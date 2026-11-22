@@ -81,7 +81,32 @@
     background: var(--teal); color: #fff; border-color: var(--teal);
     animation: pulse 1.2s ease-in-out infinite;
   }
-  @keyframes pulse { 0%,100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(115,168,154,0.5);} 50% { transform: scale(1.07); box-shadow: 0 0 0 14px rgba(115,168,154,0);} }
+  /* Mic states: each one looks and reads differently so kids always know whether to talk. */
+  .micwrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .mic { width: 104px; height: 104px; border-width: 4px; transition: background 0.25s, color 0.25s, border-color 0.25s, transform 0.15s; }
+  .mic svg { width: 44px; height: 44px; }
+  .mic.st-wait { background: var(--sand); color: var(--ink2); border-color: var(--hairline); }
+  .mic.st-listen { background: #2f9e6e; color: #fff; border-color: #2f9e6e; animation: pulse 1.2s ease-in-out infinite; }
+  .mic.st-hearing { background: var(--gold); color: #fff; border-color: var(--gold); animation: hear 0.45s ease-in-out infinite; }
+  .mic.st-off { background: var(--page); color: #b9b4b6; border-color: var(--hairline); border-style: dashed; }
+  @keyframes hear { 0%,100% { transform: scale(1.04); } 50% { transform: scale(1.14); } }
+  .miclabel {
+    margin: 0; padding: 8px 16px; border-radius: 999px; font-weight: 700; font-size: 17px;
+    display: inline-flex; align-items: center; gap: 8px; transition: background 0.25s, color 0.25s;
+  }
+  .miclabel .dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+  .miclabel.st-wait { background: var(--sand); color: var(--ink2); }
+  .miclabel.st-listen { background: #e3f4ec; color: #1f7a52; }
+  .miclabel.st-listen .dot { animation: blink 1s steps(2) infinite; }
+  .miclabel.st-hearing { background: #fbefd9; color: #9a5d06; }
+  .miclabel.st-off { background: transparent; color: #a19c9e; font-weight: 600; }
+  @keyframes blink { 50% { opacity: 0.2; } }
+  .bars { display: inline-flex; gap: 3px; align-items: flex-end; height: 16px; }
+  .bars i { width: 4px; background: currentColor; border-radius: 2px; animation: bar 0.6s ease-in-out infinite; }
+  .bars i:nth-child(2) { animation-delay: 0.15s; } .bars i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bar { 0%,100% { height: 4px; } 50% { height: 16px; } }
+  @media (prefers-reduced-motion: reduce) { .mic, .miclabel .dot, .bars i { animation: none !important; } }
+  @keyframes pulse { 0%,100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(47,158,110,0.55);} 50% { transform: scale(1.07); box-shadow: 0 0 0 18px rgba(47,158,110,0);} }
   .typerow { display: flex; gap: 8px; width: 100%; max-width: 420px; }
   input[type=text] {
     flex: 1; min-width: 0; font: inherit;
@@ -155,7 +180,10 @@
       <p class="meta" id="meta"></p>
       <p class="question" id="question"></p>
       <p class="status" id="status"></p>
-      <button class="mic" id="micBtn" aria-label="Tap to answer by voice"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/></svg></button>
+      <div class="micwrap" id="micWrap">
+        <button class="mic st-off" id="micBtn" aria-label="Microphone"></button>
+        <p class="miclabel st-off" id="micLabel" aria-live="polite"></p>
+      </div>
       <div class="typerow hidden" id="typerow">
         <input type="text" id="typed" placeholder="Type your answer" aria-label="Type your answer">
         <button class="btn primary" id="answerBtn">Answer</button>
@@ -517,7 +545,8 @@
   var wantListening = false;
   var captureFailures = 0;
   var listenReadyAt = 0; // results delivered before this time are the game's own voice
-  var attempts = 0;    // wrong voice tries on the current question
+  var attempts = 0;
+  var hearing = false;   // the recognizer reports a voice right now    // wrong voice tries on the current question
 
   function startRecognizer() {
     var Recognizer = getRecognizer();
@@ -566,8 +595,11 @@
       }
       // 'no-speech' and 'aborted' need no message: the listener simply keeps listening.
     };
+    rec.onspeechstart = function () { hearing = true; updateMic(); };
+    rec.onspeechend = function () { hearing = false; updateMic(); };
     rec.onend = function () {
       recRunning = false;
+      hearing = false;
       if (wantListening) {
         try { rec.start(); recRunning = true; } catch (e) { /* retries on next onend */ }
       }
@@ -581,9 +613,44 @@
     }
   }
 
+  var MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/></svg>';
+  var MIC_OFF_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="3" y1="3" x2="21" y2="21"/></svg>';
+  var SPEAKER_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg>';
+  var MIC_STATES = {
+    wait:    { icon: SPEAKER_ICON, label: '<span class="dot"></span>Listen to the question…', aria: 'The game is talking. Wait.' },
+    listen:  { icon: MIC_ICON,     label: '<span class="dot"></span>Mic is ON — say your answer!', aria: 'Microphone on. Say your answer.' },
+    hearing: { icon: MIC_ICON,     label: '<span class="bars"><i></i><i></i><i></i></span>I can hear you…', aria: 'Hearing you.' },
+    off:     { icon: MIC_OFF_ICON, label: 'Mic is off', aria: 'Microphone off.' }
+  };
+  var micState = '';
+  function currentMicState() {
+    if (inputMode !== 'voice' || !wantListening) return 'off';
+    if (phase === 'speaking') return 'wait';
+    if (phase === 'ready' || phase === 'listening') {
+      if (Date.now() < listenReadyAt) return 'wait';
+      return hearing ? 'hearing' : 'listen';
+    }
+    return 'off';
+  }
+  function updateMic() {
+    var next = currentMicState();
+    el('status').style.display = inputMode === 'voice' ? 'none' : '';
+    if (next === micState) return;
+    micState = next;
+    var cfg = MIC_STATES[next];
+    var btn = el('micBtn');
+    btn.className = 'mic st-' + next;
+    btn.innerHTML = cfg.icon;
+    btn.setAttribute('aria-label', cfg.aria);
+    var label = el('micLabel');
+    label.className = 'miclabel st-' + next;
+    label.innerHTML = cfg.label;
+  }
+  // One clock drives the look, so it can never drift from the real listening state.
+  setInterval(updateMic, 120);
+
   function beginListening() {
     wantListening = true;
-    el('micBtn').classList.add('on');
     if (!rec) {
       if (!startRecognizer()) {
         switchToTyping('The listener could not start here, so answers switch to typing.');
@@ -596,7 +663,6 @@
 
   function stopListeningAll() {
     wantListening = false;
-    el('micBtn').classList.remove('on');
     if (rec && recRunning) {
       try { rec.stop(); } catch (e) { /* ignore */ }
     }
@@ -643,6 +709,7 @@
     question = pickQuestion(pool, asked);
     asked.push(question.entry.country);
     attempts = 0;
+    hearing = false;
     el('heard').textContent = '';
     el('typed').value = '';
     setFeedback('', '');
@@ -735,7 +802,7 @@
   function switchToTyping(message) {
     inputMode = 'typing';
     stopListeningAll();
-    hide('micBtn');
+    hide('micWrap');
     show('typerow');
     el('status').textContent = 'Type your answer and press Answer.';
     if (message) setFeedback(message, 'note');
@@ -749,11 +816,11 @@
     ac(); // unlock audio on this user gesture
     inputMode = getRecognizer() ? 'voice' : 'typing';
     if (inputMode === 'voice') {
-      show('micBtn');
+      show('micWrap');
       hide('typerow');
       beginListening(); // single permission prompt covers the whole game
     } else {
-      hide('micBtn');
+      hide('micWrap');
       show('typerow');
     }
     hide('welcome');
