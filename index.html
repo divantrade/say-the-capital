@@ -571,6 +571,7 @@
       alternatives = alternatives.filter(function (t) {
         var h = normalize(t);
         if (h.length < 2) return false;
+        if (/\btry again\b/.test(h)) return false; // the game's own "Try again" heard back
         if (!qNorm) return true;
         var inQuestion = (' ' + qNorm + ' ').indexOf(' ' + h + ' ') !== -1;
         return !inQuestion && h.indexOf(qNorm) === -1;
@@ -783,13 +784,22 @@
       el('heard').textContent = 'The game heard: “' + heardText + '”';
       setFeedback('Try again!', 'note');
       if (inputMode === 'typing') { el('typed').value = ''; el('typed').focus(); }
-      listenReadyAt = Infinity; // the game's own "Try again" must never count as an answer
+      listenReadyAt = Infinity; // the game's own voice must never count as an answer
+      hearing = false;
+      clearTimeout(silenceTimer);
+      // Throw away anything the recognizer was still processing from the first answer,
+      // so a leftover word can't be graded as the second try. The listener restarts on its own.
+      if (inputMode === 'voice' && rec && recRunning) { try { rec.abort(); } catch (e) { /* ignore */ } }
+      // Repeat the question after "Try again" so the child hears it once more before answering.
+      var retryLine = inputMode === 'voice' ? 'Try again! ' + questionText(question) : 'Try again!';
       // Safety net: if the browser never reports the end of speech, listen again anyway.
-      setTimeout(function () { if (listenReadyAt === Infinity) listenReadyAt = Date.now(); }, 2500);
-      speak('Try again!', function () {
-        if (phase === 'ready' || phase === 'listening') listenReadyAt = Date.now() + 600;
+      setTimeout(function () { if (listenReadyAt === Infinity) listenReadyAt = Date.now(); }, 9000);
+      speak(retryLine, function () {
+        if (phase === 'ready' || phase === 'listening') {
+          listenReadyAt = Date.now() + 1000; // a calm second before the mic turns green again
+          armSilenceHint();
+        }
       });
-      armSilenceHint();
     } else {
       el('heard').textContent = inputMode === 'voice' ? 'The game heard: “' + heardText + '”' : '';
       var prompt = question.direction === 'country'
