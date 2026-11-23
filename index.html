@@ -175,6 +175,8 @@
   .flag { width: 64px; height: 48px; border-radius: 8px; object-fit: cover; border: 3px solid #fff; box-shadow: 0 4px 14px rgba(0,0,0,0.35); flex: none; animation: wave 2.4s ease-in-out infinite; transform-origin: left center; }
   @keyframes wave { 0%,100% { transform: rotate(0) skewY(0); } 50% { transform: rotate(-3deg) skewY(2deg); } }
   .herocity { margin: 0; font-size: 30px; font-weight: 800; line-height: 1.05; text-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+  .herocity { cursor: pointer; }
+  .herocity::after { content: ' 🔊'; font-size: 0.6em; vertical-align: middle; }
   .herocountry { margin: 2px 0 0; font-size: 15px; opacity: 0.92; font-weight: 600; }
   .herobadge { position: absolute; top: 12px; left: 12px; z-index: 1; background: rgba(255,255,255,0.92); color: var(--ink); border-radius: 999px; padding: 5px 12px; font-size: 12px; font-weight: 700; }
 
@@ -281,7 +283,7 @@
         <div class="herotext">
           <img class="flag" id="reFlag" alt="" />
           <div>
-            <p class="herocity" id="reCity"></p>
+            <p class="herocity" id="reCity" role="button" tabindex="0" title="Tap to hear it"></p>
             <p class="herocountry" id="reCountry"></p>
           </div>
         </div>
@@ -656,6 +658,27 @@
   // Fix 1: browsers sometimes never say "finished talking" (Chrome drops the event when the
   // utterance is garbage-collected; Safari after cancel). Keep a reference, and always finish
   // on a timer sized to the sentence, so the game can never get stuck waiting.
+  // Voices load late in Chrome (the list is empty at first), so keep it fresh.
+  var voiceList = [];
+  function loadVoices() { try { voiceList = window.speechSynthesis ? window.speechSynthesis.getVoices() : []; } catch (e) { voiceList = []; } }
+  loadVoices();
+  if (window.speechSynthesis && 'onvoiceschanged' in window.speechSynthesis) window.speechSynthesis.onvoiceschanged = loadVoices;
+  function pickVoice(lang) {
+    if (!voiceList.length) loadVoices();
+    var norm = function (l) { return String(l || '').replace('_', '-').toLowerCase(); };
+    var want = norm(lang), base = want.split('-')[0];
+    var exact = voiceList.filter(function (v) { return norm(v.lang) === want; });
+    var same = exact.length ? exact : voiceList.filter(function (v) { return norm(v.lang).split('-')[0] === base; });
+    if (!same.length) return null;
+    return same.find(function (v) { return v.localService; }) || same[0];
+  }
+  var soundBlocked = false;
+  function soundBlockedNote() {
+    if (soundBlocked) return;
+    soundBlocked = true;
+    setFeedback('🔈 No sound? Tap “Hear the question again” to turn the sound on.', 'note');
+  }
+
   var speakToken = 0;
   var currentUtterance = null;
   function speak(text, onEnd) {
@@ -675,9 +698,17 @@
       if (synth.speaking || synth.pending) synth.cancel();
       var u = new SpeechSynthesisUtterance(text);
       u.lang = 'en-US';
+      var en = pickVoice('en-US') || pickVoice('en-GB');
+      if (en) u.voice = en; // a device set to another language would otherwise read English with a foreign voice
       u.rate = 0.92;
+      u.onstart = function () { soundBlocked = false; };
       u.onend = function () { clearTimeout(safety); finish(); };
-      u.onerror = function () { clearTimeout(safety); finish(); };
+      u.onerror = function (ev) {
+        clearTimeout(safety);
+        // Safari, iPad and iPhone refuse speech that does not start from a tap.
+        if (ev && ev.error === 'not-allowed') soundBlockedNote();
+        finish();
+      };
       currentUtterance = u; // keeps it alive until it ends
       synth.speak(u);
       if (synth.paused) synth.resume();
@@ -986,17 +1017,24 @@
     try {
       var synth = window.speechSynthesis;
       if (!synth) return;
-      synth.cancel();
-      var u = new SpeechSynthesisUtterance(helloToSay.text);
-      u.lang = helloToSay.lang;
-      u.rate = 0.85;
-      var voices = synth.getVoices ? synth.getVoices() : [];
-      var base = helloToSay.lang.split('-')[0];
-      var voice = voices.find(function (vc) { return vc.lang === helloToSay.lang; }) ||
-        voices.find(function (vc) { return vc.lang && vc.lang.split(/[-_]/)[0] === base; });
-      if (voice) u.voice = voice;
+      if (synth.speaking || synth.pending) synth.cancel();
+      var native = pickVoice(helloToSay.lang);
+      // With a voice for that language, say the word the local way (你好, こんにちは, مرحبا).
+      // Without one, an English voice would stay silent on those letters, so it says the Latin spelling.
+      var text = native ? (helloToSay.native || helloToSay.latin) : helloToSay.latin;
+      var u = new SpeechSynthesisUtterance(text.replace(/[!¡]/g, ''));
+      if (native) { u.voice = native; u.lang = native.lang; }
+      else { u.lang = 'en-US'; var en = pickVoice('en-US'); if (en) u.voice = en; }
+      u.rate = 0.8;
+      currentUtterance = u;
       synth.speak(u);
+      if (synth.paused) synth.resume();
     } catch (e) { /* no speech here */ }
+  }
+  function sayCity() {
+    if (!question) return;
+    var c = question.entry;
+    speak(c.capital + '! The capital of ' + c.country + '.', function () {});
   }
 
   function showReveal() {
@@ -1017,7 +1055,7 @@
     el('reHelloLabel').textContent = 'Say hello in ' + facts[1].split(/,| and /)[0];
     el('reHello').textContent = facts[2] + '!';
     el('reHelloNative').textContent = facts[3] ? facts[3] : '';
-    helloToSay = { text: facts[3] || facts[2], lang: facts[4] };
+    helloToSay = { native: facts[3], latin: facts[2], lang: facts[4] };
     el('rePop').textContent = facts[0];
     el('rePopLabel').textContent = 'People live in ' + country;
     el('reLang').textContent = facts[1];
@@ -1172,6 +1210,10 @@
     asked = [];
     ac(); // unlock audio on this user gesture
     inputMode = getRecognizer() ? 'voice' : 'typing';
+    // Speak once right inside the tap: Safari, iPad and iPhone only allow sound that starts from a tap,
+    // and the first question now waits for the microphone, which is no longer inside the tap.
+    soundBlocked = false;
+    speak("Let's play!", function () {});
     hide('welcome');
     hide('roundEnd');
     show('game');
@@ -1230,6 +1272,7 @@
     else askNext();
   });
   el('reHelloBtn').addEventListener('click', sayHello);
+  el('reCity').addEventListener('click', sayCity);
   el('answerBtn').addEventListener('click', function () { grade(el('typed').value); });
   el('typed').addEventListener('keydown', function (e) { if (e.key === 'Enter') grade(el('typed').value); });
 })();
