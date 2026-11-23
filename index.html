@@ -553,9 +553,19 @@
     if (dbgBox) { dbgBox.remove(); dbgBox = null; return; }
     dbgBox = document.createElement('div');
     dbgBox.className = 'dbg';
-    dbgBox.innerHTML = '<button id="dbgSpeak">Test voice</button><button id="dbgBeep">Test beep</button><button id="dbgClose">Close</button><pre></pre>';
+    dbgBox.innerHTML = '<button id="dbgSpeak">Test voice</button><button id="dbgBeep">Test beep</button><button id="dbgFile">Test recorded</button><button id="dbgClose">Close</button><pre></pre>';
     document.body.appendChild(dbgBox);
     dbgBox.querySelector('#dbgClose').onclick = function () { dbgBox.remove(); dbgBox = null; };
+    dbgBox.querySelector('#dbgFile').onclick = function () {
+      setAudioMode('playback');
+      var au = new Audio('audio/test.m4a');
+      au.onplaying = function () { dbg('recorded PLAYING'); };
+      au.onended = function () { dbg('recorded END'); };
+      au.onerror = function () { dbg('recorded ERROR'); };
+      var pr = au.play();
+      if (pr && pr.catch) pr.catch(function (e) { dbg('recorded play() refused: ' + e.name); });
+      dbg('recorded play() micOn=' + recRunning);
+    };
     dbgBox.querySelector('#dbgBeep').onclick = function () { dbg('test beep'); tone(660, 0, 0.3, 'sine', 0.3); };
     dbgBox.querySelector('#dbgSpeak').onclick = function () {
       var ss = window.speechSynthesis;
