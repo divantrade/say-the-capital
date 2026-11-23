@@ -681,7 +681,9 @@
     stuckShown = true;
     var b = document.createElement('div');
     b.className = 'stucknote';
-    b.innerHTML = '🔇 <b>The browser\'s voice is stuck.</b> Quit the browser completely (⌘Q on a Mac) and open the game again. The game still works without sound.';
+    b.innerHTML = TURN_BASED
+      ? '🔇 <b>No sound from the game?</b> Turn off silent mode (the switch on the side of the phone), turn the volume up, then tap “Hear the question again”.'
+      : '🔇 <b>The browser\'s voice is stuck.</b> Quit the browser completely (⌘Q on a Mac) and open the game again. The game still works without sound.';
     document.body.appendChild(b);
   }
   var soundBlocked = false;
@@ -701,11 +703,33 @@
     c.onstart = u.onstart; c.onend = u.onend; c.onerror = u.onerror;
     return c;
   }
+  // iPhone and iPad: while the mic is on (or just switched off), the phone keeps its audio in
+  // "recording" mode and the game's voice comes out silent or from the tiny ear speaker.
+  // So the game speaks only once the mic is fully off, and asks for normal loudspeaker sound.
+  function setAudioMode(type) {
+    try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch (e) { /* not supported */ }
+  }
+  var micStoppedAt = 0;
+  function whenMicQuiet(f) {
+    if (!TURN_BASED) { f(); return; }
+    var t0 = Date.now();
+    var check = function () {
+      var busy = recRunning || recStarting || Date.now() - micStoppedAt < 400;
+      if (busy && Date.now() - t0 < 2000) { setTimeout(check, 80); return; }
+      setAudioMode('playback');
+      f();
+    };
+    check();
+  }
   function utter(u, retried) {
     var synth = window.speechSynthesis;
     var started = false;
-    var go = function () {
+    var go = function (micChecked) {
       if (currentUtterance !== u) return; // something newer took over
+      if (!micChecked && TURN_BASED && (recRunning || recStarting || Date.now() - micStoppedAt < 400)) {
+        whenMicQuiet(function () { go(true); }); return;
+      }
+      setAudioMode('playback');
       u.addEventListener('start', function () { started = true; });
       synth.speak(u);
       if (synth.paused) synth.resume();
@@ -857,6 +881,7 @@
     r.onspeechstart = function () { hearing = true; updateMic(); };
     r.onspeechend = function () { hearing = false; updateMic(); };
     r.onend = function () {
+      if (recRunning || recStarting) micStoppedAt = Date.now();
       recRunning = false;
       recStarting = false;
       hearing = false;
@@ -870,6 +895,7 @@
     if (!wantListening || recRunning || recStarting) return;
     if (!rec) rec = makeRecognizer();
     if (!rec) return;
+    if (TURN_BASED) setAudioMode('play-and-record');
     try { recStarting = true; rec.start(); }
     catch (e) { recStarting = false; scheduleRestart(400); }
   }
@@ -930,7 +956,7 @@
     if (!TURN_BASED || inputMode !== 'voice') return;
     wantListening = false;
     clearTimeout(restartTimer);
-    if (rec && (recRunning || recStarting)) { try { rec.abort(); } catch (e) { /* ignore */ } }
+    if (rec && (recRunning || recStarting)) { micStoppedAt = Date.now(); try { rec.abort(); } catch (e) { /* ignore */ } }
   }
 
   var MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/></svg>';
