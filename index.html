@@ -176,6 +176,7 @@
   @keyframes wave { 0%,100% { transform: rotate(0) skewY(0); } 50% { transform: rotate(-3deg) skewY(2deg); } }
   .herocity { margin: 0; font-size: 30px; font-weight: 800; line-height: 1.05; text-shadow: 0 2px 8px rgba(0,0,0,0.4); }
   .herocity { cursor: pointer; }
+  .stucknote { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 50; max-width: min(560px, calc(100% - 32px)); background: #fff4d6; color: #6b4a00; border: 2px solid #e8a33d; border-radius: 14px; padding: 12px 16px; font-size: 15px; line-height: 1.4; box-shadow: 0 8px 24px rgba(0,0,0,0.15); }
   .herocity::after { content: ' 🔊'; font-size: 0.6em; vertical-align: middle; }
   .herocountry { margin: 2px 0 0; font-size: 15px; opacity: 0.92; font-weight: 600; }
   .herobadge { position: absolute; top: 12px; left: 12px; z-index: 1; background: rgba(255,255,255,0.92); color: var(--ink); border-radius: 999px; padding: 5px 12px; font-size: 12px; font-weight: 700; }
@@ -672,11 +673,59 @@
     if (!same.length) return null;
     return same.find(function (v) { return v.localService; }) || same[0];
   }
+  // When the browser's voice engine is jammed (Chrome on a Mac can get stuck until it is restarted),
+  // say so plainly instead of staying silent.
+  var stuckShown = false;
+  function voiceStuckNote() {
+    if (stuckShown) return;
+    stuckShown = true;
+    var b = document.createElement('div');
+    b.className = 'stucknote';
+    b.innerHTML = '🔇 <b>The browser\'s voice is stuck.</b> Quit the browser completely (⌘Q on a Mac) and open the game again. The game still works without sound.';
+    document.body.appendChild(b);
+  }
   var soundBlocked = false;
   function soundBlockedNote() {
     if (soundBlocked) return;
     soundBlocked = true;
     setFeedback('🔈 No sound? Tap “Hear the question again” to turn the sound on.', 'note');
+  }
+
+  // Chrome bug: speaking right after cancel() can jam the speech engine (it stays "speaking"
+  // in silence and every later line queues behind it). So: after a cancel, wait a moment before
+  // speaking; and if a line has not started within 1.5 s, clear the jam and say it again once.
+  function cloneUtterance(u) {
+    var c = new SpeechSynthesisUtterance(u.text);
+    c.lang = u.lang; c.rate = u.rate; c.pitch = u.pitch; c.volume = u.volume;
+    if (u.voice) c.voice = u.voice;
+    c.onstart = u.onstart; c.onend = u.onend; c.onerror = u.onerror;
+    return c;
+  }
+  function utter(u, retried) {
+    var synth = window.speechSynthesis;
+    var started = false;
+    var go = function () {
+      if (currentUtterance !== u) return; // something newer took over
+      u.addEventListener('start', function () { started = true; });
+      synth.speak(u);
+      if (synth.paused) synth.resume();
+      setTimeout(function () {
+        if (started || currentUtterance !== u) return;
+        if (retried) { voiceStuckNote(); return; }
+        var again = cloneUtterance(u);
+        u.onstart = null; u.onend = null; u.onerror = null; // the jammed copy must not end the line early
+        currentUtterance = again;
+        try { synth.cancel(); } catch (e) { /* ignore */ }
+        setTimeout(function () { utter(again, true); }, 250);
+      }, 1500);
+    };
+    currentUtterance = u;
+    if (synth.speaking || synth.pending) {
+      try { synth.cancel(); } catch (e) { /* ignore */ }
+      setTimeout(go, 250);
+    } else {
+      go(); // nothing to clear: speak right away (inside the tap, which Safari and iPad need)
+    }
   }
 
   var speakToken = 0;
@@ -691,11 +740,10 @@
       onEnd();
     };
     var words = String(text).split(/\s+/).length;
-    var safety = setTimeout(finish, 1500 + words * 450);
+    var safety = setTimeout(finish, 3500 + words * 450);
     try {
       var synth = window.speechSynthesis;
       if (!synth) { clearTimeout(safety); setTimeout(finish, 300 + words * 300); return; }
-      if (synth.speaking || synth.pending) synth.cancel();
       var u = new SpeechSynthesisUtterance(text);
       u.lang = 'en-US';
       var en = pickVoice('en-US') || pickVoice('en-GB');
@@ -709,9 +757,7 @@
         if (ev && ev.error === 'not-allowed') soundBlockedNote();
         finish();
       };
-      currentUtterance = u; // keeps it alive until it ends
-      synth.speak(u);
-      if (synth.paused) synth.resume();
+      utter(u); // also keeps it alive until it ends
     } catch (e) { clearTimeout(safety); finish(); }
   }
 
@@ -1017,7 +1063,6 @@
     try {
       var synth = window.speechSynthesis;
       if (!synth) return;
-      if (synth.speaking || synth.pending) synth.cancel();
       var native = pickVoice(helloToSay.lang);
       // With a voice for that language, say the word the local way (你好, こんにちは, مرحبا).
       // Without one, an English voice would stay silent on those letters, so it says the Latin spelling.
@@ -1026,9 +1071,8 @@
       if (native) { u.voice = native; u.lang = native.lang; }
       else { u.lang = 'en-US'; var en = pickVoice('en-US'); if (en) u.voice = en; }
       u.rate = 0.8;
-      currentUtterance = u;
-      synth.speak(u);
-      if (synth.paused) synth.resume();
+      speakToken += 1;
+      utter(u);
     } catch (e) { /* no speech here */ }
   }
   function sayCity() {
@@ -1213,7 +1257,9 @@
     // Speak once right inside the tap: Safari, iPad and iPhone only allow sound that starts from a tap,
     // and the first question now waits for the microphone, which is no longer inside the tap.
     soundBlocked = false;
-    speak("Let's play!", function () {});
+    var greeted = false, afterGreeting = null;
+    speak("Let's play!", function () { greeted = true; if (afterGreeting) { var f = afterGreeting; afterGreeting = null; f(); } });
+    var whenGreeted = function (f) { if (greeted) f(); else afterGreeting = f; };
     hide('welcome');
     hide('roundEnd');
     show('game');
@@ -1221,14 +1267,14 @@
     if (inputMode === 'voice') {
       show('micWrap');
       hide('typerow');
-      if (micAllowed) { askNext(); return; }
+      if (micAllowed) { whenGreeted(askNext); return; }
       // Fix 4: ask for the microphone first, and only read the first question once it is on,
       // so an answer can't be lost while the permission prompt is still open.
       phase = 'permission';
       el('question').textContent = 'Getting the microphone ready…';
       el('status').textContent = '';
       var started = false;
-      var go = function () { if (started) return; started = true; if (TURN_BASED) micOffForTalk(); askNext(); };
+      var go = function () { if (started) return; started = true; if (TURN_BASED) micOffForTalk(); whenGreeted(askNext); };
       onFirstStart = go;
       setTimeout(function () { if (!started && micAllowed) go(); }, 500);
       setTimeout(function () { if (!started) { onFirstStart = null; go(); } }, 12000);
@@ -1236,7 +1282,7 @@
     } else {
       hide('micWrap');
       show('typerow');
-      askNext();
+      whenGreeted(askNext);
     }
   }
 
