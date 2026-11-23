@@ -67,7 +67,11 @@ function record(key, text, voice, rate) {
   if (existsSync(out)) return;
   const aiff = join(tmpdir(), 'stc-' + name + '.aiff');
   execFileSync('say', ['-v', voice.name, '-r', String(rate), '-o', aiff, text]);
-  execFileSync('afconvert', ['-f', 'm4af', '-d', 'aac', '-b', '40000', '-c', '1', aiff, out]);
+  // Loud and even: every line normalised to the same loudness (about -13 LUFS) so the game is
+  // clearly heard on a phone speaker. Needs ffmpeg (brew install ffmpeg).
+  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', aiff,
+    '-af', 'acompressor=threshold=-24dB:ratio=3:attack=5:release=80,loudnorm=I=-13:TP=-1:LRA=6',
+    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '48k', out]);
   unlinkSync(aiff);
 }
 for (const s of lines) record(s, s, EN, 165);

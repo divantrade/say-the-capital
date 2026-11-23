@@ -322,7 +322,6 @@
     </div>
   </div>
 
-  <button id="dbgOpen" class="dbg-open" type="button">🔧 Sound check</button>
   <p class="parents">
     For parents: voice answers use the browser's built-in speech recognition. In Chrome and Edge the audio is
     processed by the browser maker's speech service; the game itself records nothing, stores nothing, and has no
@@ -546,7 +545,10 @@
     dbgBox.querySelector('pre').textContent = dbgEnv() + '\n\n' + DBG.slice().reverse().join('\n');
   }
   var titleTaps = 0, titleTimer = null;
-  document.getElementById('dbgOpen').addEventListener('click', function () {
+  // To bring the sound log back while testing on a phone, add this to the page:
+  // <button id="dbgOpen" class="dbg-open" type="button">🔧 Sound check</button>
+  var dbgOpenBtn = document.getElementById('dbgOpen');
+  if (dbgOpenBtn) dbgOpenBtn.addEventListener('click', function () {
     if (dbgBox) { dbgBox.remove(); dbgBox = null; return; }
     dbgBox = document.createElement('div');
     dbgBox.className = 'dbg';
