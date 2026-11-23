@@ -88,6 +88,7 @@
   .mic.st-wait { background: var(--sand); color: var(--ink2); border-color: var(--hairline); }
   .mic.st-listen { background: #2f9e6e; color: #fff; border-color: #2f9e6e; animation: pulse 1.2s ease-in-out infinite; }
   .mic.st-hearing { background: var(--gold); color: #fff; border-color: var(--gold); animation: hear 0.45s ease-in-out infinite; }
+  .mic.st-start, .mic.st-allow { background: var(--sand); color: #1f7a52; border-color: #2f9e6e; border-style: dashed; }
   .mic.st-off { background: var(--page); color: #b9b4b6; border-color: var(--hairline); border-style: dashed; }
   @keyframes hear { 0%,100% { transform: scale(1.04); } 50% { transform: scale(1.14); } }
   .miclabel {
@@ -99,6 +100,7 @@
   .miclabel.st-listen { background: #e3f4ec; color: #1f7a52; }
   .miclabel.st-listen .dot { animation: blink 1s steps(2) infinite; }
   .miclabel.st-hearing { background: #fbefd9; color: #9a5d06; }
+  .miclabel.st-start, .miclabel.st-allow { background: #eef6f1; color: #1f7a52; }
   .miclabel.st-off { background: transparent; color: #a19c9e; font-weight: 600; }
   @keyframes blink { 50% { opacity: 0.2; } }
   .bars { display: inline-flex; gap: 3px; align-items: flex-end; height: 16px; }
@@ -651,18 +653,35 @@
       : q.entry.capital + ' is the capital of which country?';
   }
 
+  // Fix 1: browsers sometimes never say "finished talking" (Chrome drops the event when the
+  // utterance is garbage-collected; Safari after cancel). Keep a reference, and always finish
+  // on a timer sized to the sentence, so the game can never get stuck waiting.
+  var speakToken = 0;
+  var currentUtterance = null;
   function speak(text, onEnd) {
+    var token = ++speakToken;
+    var finished = false;
+    var finish = function () {
+      if (finished) return;
+      finished = true;
+      if (token === speakToken) currentUtterance = null;
+      onEnd();
+    };
+    var words = String(text).split(/\s+/).length;
+    var safety = setTimeout(finish, 1500 + words * 450);
     try {
       var synth = window.speechSynthesis;
-      if (!synth) { onEnd(); return; }
-      synth.cancel();
+      if (!synth) { clearTimeout(safety); setTimeout(finish, 300 + words * 300); return; }
+      if (synth.speaking || synth.pending) synth.cancel();
       var u = new SpeechSynthesisUtterance(text);
       u.lang = 'en-US';
       u.rate = 0.92;
-      u.onend = onEnd;
-      u.onerror = onEnd;
+      u.onend = function () { clearTimeout(safety); finish(); };
+      u.onerror = function () { clearTimeout(safety); finish(); };
+      currentUtterance = u; // keeps it alive until it ends
       synth.speak(u);
-    } catch (e) { onEnd(); }
+      if (synth.paused) synth.resume();
+    } catch (e) { clearTimeout(safety); finish(); }
   }
 
   function getRecognizer() {
@@ -691,51 +710,55 @@
       ' · Level ' + level + ' · Streak ' + streak;
   }
 
-  // ---------- Continuous recognition: one permission prompt per game ----------
+  // ---------- Listening ----------
+  // Desktop Chrome/Edge: one continuous listener for the whole game (one permission prompt).
+  // Phones and tablets (Android, iPad, iPhone): continuous listening is unreliable there and the
+  // mic fights the game's own voice, so the game listens only while it is the child's turn (Fix 5).
+  var TURN_BASED = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   var rec = null;
-  var recRunning = false;
+  var recRunning = false;   // true only between the recognizer's start and end events
+  var recStarting = false;
   var wantListening = false;
   var captureFailures = 0;
+  var networkFailures = 0;
   var listenReadyAt = 0; // results delivered before this time are the game's own voice
   var attempts = 0;
-  var hearing = false;   // the recognizer reports a voice right now    // wrong voice tries on the current question
+  var hearing = false;   // the recognizer reports a voice right now
+  var micAllowed = false; // the recognizer has started at least once (permission granted)
+  var onFirstStart = null;
+  var restartTimer = null;
 
-  function startRecognizer() {
+  function makeRecognizer() {
     var Recognizer = getRecognizer();
-    if (!Recognizer) return false;
-    rec = new Recognizer();
-    rec.lang = 'en-US';
-    rec.interimResults = false;
-    rec.maxAlternatives = 3;
-    rec.continuous = true;
-    rec.onresult = function (event) {
-      // Ignore anything heard while the question or feedback is being spoken: on laptop
-      // speakers the recognizer can hear the game itself, and that must never be graded.
-      if (phase !== 'listening' && phase !== 'ready') return;
-      // The question's audio tail can finalize after speech ends; drop early results.
-      if (Date.now() < listenReadyAt) return;
-      var last = event.results[event.results.length - 1];
-      if (!last.isFinal) return;
-      var alternatives = [];
-      for (var i = 0; i < last.length; i += 1) alternatives.push(last[i].transcript);
-      // Drop results that are the game hearing its own question (echo).
-      var qNorm = question ? normalize(questionText(question)) : '';
-      alternatives = alternatives.filter(function (t) {
-        var h = normalize(t);
-        if (h.length < 2) return false;
-        if (/\btry again\b/.test(h)) return false; // the game's own "Try again" heard back
-        if (!qNorm) return true;
-        var inQuestion = (' ' + qNorm + ' ').indexOf(' ' + h + ' ') !== -1;
-        return !inQuestion && h.indexOf(qNorm) === -1;
-      });
-      if (!alternatives.length) return;
-      var hit = alternatives.find(function (t) { return question && matchesAnswer(t, question); });
-      grade(hit || alternatives[0]);
+    if (!Recognizer) return null;
+    var r = new Recognizer();
+    r.lang = 'en-US';
+    r.interimResults = false;
+    r.maxAlternatives = 3;
+    r.continuous = !TURN_BASED;
+    r.onstart = function () {
+      recRunning = true;
+      recStarting = false;
+      micAllowed = true;
+      networkFailures = 0;
+      if (onFirstStart) { var f = onFirstStart; onFirstStart = null; f(); }
     };
-    rec.onerror = function (event) {
+    r.onresult = function (event) {
+      // Fix 6: read every finished phrase in this event, not only the last one.
+      var alternatives = [];
+      for (var k = event.resultIndex; k < event.results.length; k += 1) {
+        var res = event.results[k];
+        if (!res.isFinal) continue;
+        for (var i = 0; i < res.length; i += 1) alternatives.push(res[i].transcript);
+      }
+      if (alternatives.length) handleHeard(alternatives);
+    };
+    r.onerror = function (event) {
       var code = (event && event.error) || '';
       if (code === 'not-allowed' || code === 'service-not-allowed') {
         wantListening = false;
+        if (onFirstStart) { var f = onFirstStart; onFirstStart = null; inputMode = 'typing'; f(); switchToTyping('The microphone is blocked here, so answers switch to typing.'); return; }
         switchToTyping('The microphone is blocked here, so answers switch to typing.');
       } else if (code === 'audio-capture') {
         captureFailures += 1;
@@ -745,25 +768,92 @@
         } else {
           setFeedback("I can't hear anything from the microphone. Check it and keep playing.", 'note');
         }
+      } else if (code === 'network') {
+        networkFailures += 1;
+        if (networkFailures >= 4) {
+          wantListening = false;
+          switchToTyping('Voice answers need the internet, so answers switch to typing for now.');
+        }
       }
-      // 'no-speech' and 'aborted' need no message: the listener simply keeps listening.
+      // 'no-speech' and 'aborted' need no message: the listener simply starts again.
     };
-    rec.onspeechstart = function () { hearing = true; updateMic(); };
-    rec.onspeechend = function () { hearing = false; updateMic(); };
-    rec.onend = function () {
+    r.onspeechstart = function () { hearing = true; updateMic(); };
+    r.onspeechend = function () { hearing = false; updateMic(); };
+    r.onend = function () {
       recRunning = false;
+      recStarting = false;
       hearing = false;
-      if (wantListening) {
-        try { rec.start(); recRunning = true; } catch (e) { /* retries on next onend */ }
-      }
+      if (wantListening) scheduleRestart(networkFailures ? 1200 * networkFailures : 150);
     };
-    try {
-      rec.start();
-      recRunning = true;
-      return true;
-    } catch (e) {
-      return false;
+    return r;
+  }
+
+  // Fix 2: if starting fails, keep trying (with a short pause) instead of going silent forever.
+  function tryStart() {
+    if (!wantListening || recRunning || recStarting) return;
+    if (!rec) rec = makeRecognizer();
+    if (!rec) return;
+    try { recStarting = true; rec.start(); }
+    catch (e) { recStarting = false; scheduleRestart(400); }
+  }
+  function scheduleRestart(ms) {
+    clearTimeout(restartTimer);
+    restartTimer = setTimeout(tryStart, ms);
+  }
+  // Watchdog: a listener that should be on but isn't gets restarted.
+  setInterval(function () {
+    if (wantListening && !recRunning && !recStarting) tryStart();
+    if (recStarting && !recRunning) { /* start pending (permission prompt) */ }
+  }, 1500);
+
+  // Is this phrase the game's own question being heard back?
+  function isEcho(h) {
+    var qNorm = question ? normalize(questionText(question)) : '';
+    if (h.length < 2) return true;
+    if (/\btry again\b/.test(h)) return true;
+    if (!qNorm) return false;
+    return (' ' + qNorm + ' ').indexOf(' ' + h + ' ') !== -1 || h.indexOf(qNorm) !== -1;
+  }
+  // Is the right answer itself written inside the question (e.g. Mexico City → Mexico)?
+  function answerInsideQuestion() {
+    var qNorm = ' ' + normalize(questionText(question)) + ' ';
+    return acceptedAnswers(question).some(function (a) { return qNorm.indexOf(' ' + a + ' ') !== -1; });
+  }
+
+  function handleHeard(alternatives) {
+    if (!question || inputMode !== 'voice') return;
+    var waiting = phase === 'ready' || phase === 'listening';
+    var gameTalking = phase === 'speaking' || (waiting && Date.now() < listenReadyAt);
+    if (!waiting && phase !== 'speaking') return;
+    // Fix 3: a right answer counts even if the same word is in the question (Mexico City → Mexico).
+    var hit = alternatives.find(function (t) { return matchesAnswer(t, question); });
+    if (gameTalking) {
+      // Fix 4: a child who answers early (while the question is still being read) still counts,
+      // as long as it is the right answer and could not be the game's own voice.
+      if (hit && !answerInsideQuestion()) {
+        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+        speakToken += 1; // the question's end callback is no longer needed
+        phase = 'ready';
+        grade(hit);
+      }
+      return;
     }
+    if (hit) { grade(hit); return; }
+    var real = alternatives.filter(function (t) { return !isEcho(normalize(t)); });
+    if (real.length) grade(real[0]);
+  }
+
+  // Desktop: the listener stays on. Phones/tablets: only during the child's turn.
+  function micOnForTurn() {
+    if (inputMode !== 'voice') return;
+    wantListening = true;
+    tryStart();
+  }
+  function micOffForTalk() {
+    if (!TURN_BASED || inputMode !== 'voice') return;
+    wantListening = false;
+    clearTimeout(restartTimer);
+    if (rec && (recRunning || recStarting)) { try { rec.abort(); } catch (e) { /* ignore */ } }
   }
 
   var MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="21"/><line x1="8" y1="21" x2="16" y2="21"/></svg>';
@@ -773,14 +863,19 @@
     wait:    { icon: SPEAKER_ICON, label: '<span class="dot"></span>Listen to the question…', aria: 'The game is talking. Wait.' },
     listen:  { icon: MIC_ICON,     label: '<span class="dot"></span>Mic is ON — say your answer!', aria: 'Microphone on. Say your answer.' },
     hearing: { icon: MIC_ICON,     label: '<span class="bars"><i></i><i></i><i></i></span>I can hear you…', aria: 'Hearing you.' },
-    off:     { icon: MIC_OFF_ICON, label: 'Mic is off', aria: 'Microphone off.' }
+    off:     { icon: MIC_OFF_ICON, label: 'Mic is off', aria: 'Microphone off.' },
+    start:   { icon: MIC_ICON,     label: '<span class="dot"></span>Turning the mic on…', aria: 'Starting the microphone.' },
+    allow:   { icon: MIC_ICON,     label: '<span class="dot"></span>Tap “Allow” to use the microphone', aria: 'Allow the microphone.' }
   };
   var micState = '';
   function currentMicState() {
-    if (inputMode !== 'voice' || !wantListening) return 'off';
+    if (inputMode !== 'voice') return 'off';
+    if (phase === 'permission') return 'allow';
     if (phase === 'speaking') return 'wait';
     if (phase === 'ready' || phase === 'listening') {
       if (Date.now() < listenReadyAt) return 'wait';
+      // Fix 2: green only when the listener is really running.
+      if (!recRunning) return 'start';
       return hearing ? 'hearing' : 'listen';
     }
     return 'off';
@@ -803,21 +898,15 @@
   setInterval(updateMic, 120);
 
   function beginListening() {
-    wantListening = true;
-    if (!rec) {
-      if (!startRecognizer()) {
-        switchToTyping('The listener could not start here, so answers switch to typing.');
-        return;
-      }
-    } else if (!recRunning) {
-      try { rec.start(); recRunning = true; } catch (e) { /* onend retries */ }
-    }
+    if (!getRecognizer()) { switchToTyping('The listener could not start here, so answers switch to typing.'); return; }
+    micOnForTurn();
   }
 
   function stopListeningAll() {
     wantListening = false;
-    if (rec && recRunning) {
-      try { rec.stop(); } catch (e) { /* ignore */ }
+    clearTimeout(restartTimer);
+    if (rec && (recRunning || recStarting)) {
+      try { rec.abort(); } catch (e) { /* ignore */ }
     }
   }
 
@@ -973,10 +1062,12 @@
     el('question').textContent = text;
     el('status').textContent = 'Asking the question…';
     phase = 'speaking';
+    micOffForTalk();
     speak(text, function () {
       if (phase !== 'speaking') return;
-      listenReadyAt = Date.now() + 800; // let the question's audio tail die out first
+      listenReadyAt = Date.now() + (TURN_BASED ? 300 : 800); // let the question's audio tail die out first
       phase = 'ready';
+      micOnForTurn();
       el('status').textContent = inputMode === 'voice'
         ? 'Listening… say your answer now.'
         : 'Type your answer and press Answer.';
@@ -1002,6 +1093,7 @@
       setTimeout(function () { el('panel').classList.remove('shake'); }, 600);
     }
     phase = 'feedback';
+    micOffForTalk();
     speak(note, function () { /* question follows on its own timer */ });
     // The city reveal replaces the screen a moment after the result sound and confetti.
     setTimeout(function () { if (phase === 'feedback') showReveal(); }, 1100);
@@ -1043,13 +1135,15 @@
       // Throw away anything the recognizer was still processing from the first answer,
       // so a leftover word can't be graded as the second try. The listener restarts on its own.
       if (inputMode === 'voice' && rec && recRunning) { try { rec.abort(); } catch (e) { /* ignore */ } }
+      micOffForTalk();
       // Repeat the question after "Try again" so the child hears it once more before answering.
       var retryLine = inputMode === 'voice' ? 'Try again! ' + questionText(question) : 'Try again!';
       // Safety net: if the browser never reports the end of speech, listen again anyway.
-      setTimeout(function () { if (listenReadyAt === Infinity) listenReadyAt = Date.now(); }, 9000);
+      setTimeout(function () { if (listenReadyAt === Infinity) { listenReadyAt = Date.now(); micOnForTurn(); } }, 9000);
       speak(retryLine, function () {
         if (phase === 'ready' || phase === 'listening') {
           listenReadyAt = Date.now() + 1000; // a calm second before the mic turns green again
+          micOnForTurn();
           armSilenceHint();
         }
       });
@@ -1078,19 +1172,30 @@
     asked = [];
     ac(); // unlock audio on this user gesture
     inputMode = getRecognizer() ? 'voice' : 'typing';
-    if (inputMode === 'voice') {
-      show('micWrap');
-      hide('typerow');
-      beginListening(); // single permission prompt covers the whole game
-    } else {
-      hide('micWrap');
-      show('typerow');
-    }
     hide('welcome');
     hide('roundEnd');
     show('game');
     renderStars();
-    askNext();
+    if (inputMode === 'voice') {
+      show('micWrap');
+      hide('typerow');
+      if (micAllowed) { askNext(); return; }
+      // Fix 4: ask for the microphone first, and only read the first question once it is on,
+      // so an answer can't be lost while the permission prompt is still open.
+      phase = 'permission';
+      el('question').textContent = 'Getting the microphone ready…';
+      el('status').textContent = '';
+      var started = false;
+      var go = function () { if (started) return; started = true; if (TURN_BASED) micOffForTalk(); askNext(); };
+      onFirstStart = go;
+      setTimeout(function () { if (!started && micAllowed) go(); }, 500);
+      setTimeout(function () { if (!started) { onFirstStart = null; go(); } }, 12000);
+      beginListening();
+    } else {
+      hide('micWrap');
+      show('typerow');
+      askNext();
+    }
   }
 
   el('startBtn').addEventListener('click', startGame);
@@ -1099,22 +1204,24 @@
     // Mic stays on for the whole game; the button re-arms it if the browser paused it.
     if (phase === 'speaking') {
       try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+      speakToken += 1;
       listenReadyAt = Date.now() + 800;
       phase = 'ready';
       el('status').textContent = inputMode === 'voice' ? 'Listening… say your answer now.' : 'Type your answer and press Answer.';
       armSilenceHint();
     }
-    beginListening();
+    if (phase === 'ready' || phase === 'listening' || !TURN_BASED) beginListening();
   });
   el('againBtn').addEventListener('click', function () {
     if (!question) return;
     var wasWaiting = phase === 'ready' || phase === 'listening';
     if (wasWaiting) {
       listenReadyAt = Infinity;
-      setTimeout(function () { if (listenReadyAt === Infinity) listenReadyAt = Date.now(); }, 6000);
+      micOffForTalk();
+      setTimeout(function () { if (listenReadyAt === Infinity) { listenReadyAt = Date.now(); micOnForTurn(); } }, 6000);
     }
     speak(questionText(question), function () {
-      if (wasWaiting && (phase === 'ready' || phase === 'listening')) listenReadyAt = Date.now() + 800;
+      if (wasWaiting && (phase === 'ready' || phase === 'listening')) { listenReadyAt = Date.now() + 800; micOnForTurn(); }
     });
   });
   el('nextBtn').addEventListener('click', function () {
