@@ -814,7 +814,7 @@
 
   var speakToken = 0;
   var currentUtterance = null;
-  function speak(text, onEnd) {
+  function speakTTS(text, onEnd) {
     var token = ++speakToken;
     var finished = false;
     var finish = function () {
@@ -843,6 +843,72 @@
       };
       utter(u); // also keeps it alive until it ends
     } catch (e) { clearTimeout(safety); finish(); }
+  }
+
+  // Recorded voice: every line the game says is a small audio file made by tools/record-voice.mjs.
+  // The browser's own voice is unreliable on iPhone (it goes silent or gets stuck), but plain audio
+  // files play everywhere. A line without a file falls back to the browser's voice.
+  // Keep sentenceSplit() and clipName() identical to the copies in tools/record-voice.mjs.
+  function sentenceSplit(text) {
+    return String(text).split(/(?<=[.!?])\s+/).map(function (x) { return x.trim(); }).filter(Boolean);
+  }
+  function clipName(key) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < key.length; i += 1) { h ^= key.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return ('0000000' + h.toString(16)).slice(-8);
+  }
+  var clipPlayer = null;
+  function player() {
+    if (!clipPlayer) { clipPlayer = new Audio(); clipPlayer.preload = 'auto'; clipPlayer.setAttribute('playsinline', ''); }
+    return clipPlayer;
+  }
+  // Plays one clip; calls done() when it ends. If the file can't play, onMissing() takes over.
+  function playClip(name, token, done, onMissing) {
+    var a = player();
+    var settled = false;
+    var end = function () { if (settled) return; settled = true; a.onended = null; a.onerror = null; done(); };
+    var missing = function (why) {
+      if (settled) return; settled = true; a.onended = null; a.onerror = null;
+      dbg('  clip ' + name + ' failed: ' + why);
+      onMissing();
+    };
+    whenMicQuiet(function () {
+      if (token !== speakToken) { end(); return; }
+      setAudioMode('playback');
+      a.onended = end;
+      a.onerror = function () { missing('error'); };
+      a.src = 'audio/' + name + '.m4a';
+      dbg('play clip ' + name + ' micOn=' + recRunning);
+      var pr;
+      try { pr = a.play(); } catch (e) { missing(e.name); return; }
+      if (pr && pr.catch) pr.catch(function (e) {
+        if (e && e.name === 'NotAllowedError') { soundBlockedNote(); end(); }
+        else if (e && e.name !== 'AbortError') missing(e.name);
+      });
+    });
+  }
+  function stopVoice() {
+    speakToken += 1;
+    if (clipPlayer) { try { clipPlayer.pause(); } catch (e) { /* ignore */ } }
+    try { if (window.speechSynthesis && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+  }
+  function speak(text, onEnd) {
+    if (clipPlayer && !clipPlayer.paused) { try { clipPlayer.pause(); } catch (e) { /* ignore */ } }
+    var token = ++speakToken;
+    var pieces = sentenceSplit(text);
+    var finished = false;
+    var finish = function () { if (finished) return; finished = true; clearTimeout(safety); onEnd(); };
+    var safety = setTimeout(finish, 4000 + String(text).split(/\s+/).length * 500);
+    var next = function (i) {
+      if (finished) return;
+      if (token !== speakToken || i >= pieces.length) { finish(); return; }
+      playClip(clipName(pieces[i]), token, function () { next(i + 1); }, function () {
+        // No recording for this sentence: say the rest with the browser's voice.
+        clearTimeout(safety);
+        speakTTS(pieces.slice(i).join(' '), finish);
+      });
+    };
+    next(0);
   }
 
   function getRecognizer() {
@@ -996,8 +1062,7 @@
       // Fix 4: a child who answers early (while the question is still being read) still counts,
       // as long as it is the right answer and could not be the game's own voice.
       if (hit && !answerInsideQuestion()) {
-        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
-        speakToken += 1; // the question's end callback is no longer needed
+        stopVoice(); // the question's end callback is no longer needed
         phase = 'ready';
         grade(hit);
       }
@@ -1148,6 +1213,12 @@
   var helloToSay = null;
   function sayHello() {
     if (!helloToSay) return;
+    if (clipPlayer && !clipPlayer.paused) { try { clipPlayer.pause(); } catch (e) { /* ignore */ } }
+    var token = ++speakToken;
+    playClip(clipName('hello|' + helloToSay.city), token, function () {}, sayHelloTTS);
+  }
+  function sayHelloTTS() {
+    if (!helloToSay) return;
     try {
       var synth = window.speechSynthesis;
       if (!synth) return;
@@ -1187,7 +1258,7 @@
     el('reHelloLabel').textContent = 'Say hello in ' + facts[1].split(/,| and /)[0];
     el('reHello').textContent = facts[2] + '!';
     el('reHelloNative').textContent = facts[3] ? facts[3] : '';
-    helloToSay = { native: facts[3], latin: facts[2], lang: facts[4] };
+    helloToSay = { city: city, native: facts[3], latin: facts[2], lang: facts[4] };
     el('rePop').textContent = facts[0];
     el('rePopLabel').textContent = 'People live in ' + country;
     el('reLang').textContent = facts[1];
@@ -1379,8 +1450,7 @@
   el('micBtn').addEventListener('click', function () {
     // Mic stays on for the whole game; the button re-arms it if the browser paused it.
     if (phase === 'speaking') {
-      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
-      speakToken += 1;
+      stopVoice();
       listenReadyAt = Date.now() + 800;
       phase = 'ready';
       el('status').textContent = inputMode === 'voice' ? 'Listening… say your answer now.' : 'Type your answer and press Answer.';
