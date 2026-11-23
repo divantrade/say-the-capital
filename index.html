@@ -1285,8 +1285,10 @@
     if (phase !== 'roundEnd') show('game');
   }
 
-  function askNext() {
+  var askSeq = 0;
+  function askNext(pauseMs) {
     clearTimeout(advanceTimer);
+    var mySeq = ++askSeq;
     hideReveal();
     var level = correctTotal >= 5 ? 2 : 1;
     var pool = level === 1 ? ENTRIES.filter(function (e) { return e.tier === 1; }) : ENTRIES;
@@ -1304,8 +1306,12 @@
     el('status').textContent = 'Asking the question…';
     phase = 'speaking';
     micOffForTalk();
+    // After "Next", a short breath before the new question so it doesn't rush in.
+    var pause = typeof pauseMs === 'number' ? pauseMs : 0;
+    setTimeout(function () {
+    if (mySeq !== askSeq || phase !== 'speaking') return;
     speak(text, function () {
-      if (phase !== 'speaking') return;
+      if (phase !== 'speaking' || mySeq !== askSeq) return;
       listenReadyAt = Date.now() + (TURN_BASED ? 300 : 800); // let the question's audio tail die out first
       phase = 'ready';
       micOnForTurn();
@@ -1314,6 +1320,7 @@
         : 'Type your answer and press Answer.';
       armSilenceHint();
     });
+    }, pause);
   }
 
   function finishQuestion(wasCorrect, note) {
@@ -1472,8 +1479,9 @@
   });
   el('nextBtn').addEventListener('click', function () {
     clearTimeout(advanceTimer);
+    stopVoice(); // stop the city / hello voice right away
     if (roundIndex >= ROUND_LENGTH) endRound();
-    else askNext();
+    else askNext(1500);
   });
   el('reHelloBtn').addEventListener('click', sayHello);
   el('reCity').addEventListener('click', sayCity);
