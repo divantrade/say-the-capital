@@ -176,6 +176,8 @@
   @keyframes wave { 0%,100% { transform: rotate(0) skewY(0); } 50% { transform: rotate(-3deg) skewY(2deg); } }
   .herocity { margin: 0; font-size: 30px; font-weight: 800; line-height: 1.05; text-shadow: 0 2px 8px rgba(0,0,0,0.4); }
   .herocity { cursor: pointer; }
+  .dbg { position: fixed; inset: 8px; z-index: 60; background: rgba(20,20,20,0.94); color: #d8ffd8; font: 12px/1.45 ui-monospace, Menlo, monospace; padding: 12px; border-radius: 12px; overflow: auto; white-space: pre-wrap; }
+  .dbg button { font: 600 14px system-ui; margin: 0 8px 10px 0; padding: 8px 12px; border-radius: 8px; border: 0; }
   .stucknote { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 50; max-width: min(560px, calc(100% - 32px)); background: #fff4d6; color: #6b4a00; border: 2px solid #e8a33d; border-radius: 14px; padding: 12px 16px; font-size: 15px; line-height: 1.4; box-shadow: 0 8px 24px rgba(0,0,0,0.15); }
   .herocity::after { content: ' 🔊'; font-size: 0.6em; vertical-align: middle; }
   .herocountry { margin: 2px 0 0; font-size: 15px; opacity: 0.92; font-weight: 600; }
@@ -249,7 +251,7 @@
 </head>
 <body>
 <main>
-  <h1>Say the Capital</h1>
+  <h1 id="titleH">Say the Capital</h1>
   <p class="sub">A country and capital challenge kids play out loud, in English.</p>
 
   <div class="panel" id="panel">
@@ -522,6 +524,53 @@
 
   var el = function (id) { return document.getElementById(id); };
 
+  // Hidden log for finding sound problems on a real phone: tap the title 3 times.
+  var DBG = [], DBG_T0 = Date.now(), dbgBox = null;
+  function dbg(m) {
+    DBG.push(((Date.now() - DBG_T0) / 1000).toFixed(1) + 's ' + m);
+    if (DBG.length > 200) DBG.shift();
+    if (dbgBox) renderDbg();
+  }
+  function dbgEnv() {
+    var ss = window.speechSynthesis;
+    var vs = ss ? ss.getVoices() : [];
+    return 'standalone=' + (navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)) +
+      ' voices=' + vs.length + ' en=' + vs.filter(function (v) { return /^en/i.test(v.lang); }).length +
+      ' speaking=' + (ss && ss.speaking) + ' pending=' + (ss && ss.pending) +
+      ' audioSession=' + (navigator.audioSession ? navigator.audioSession.type : 'none') +
+      ' webaudio=' + (audioCtx ? audioCtx.state : 'none') + '\n' + navigator.userAgent;
+  }
+  function renderDbg() {
+    dbgBox.querySelector('pre').textContent = dbgEnv() + '\n\n' + DBG.slice().reverse().join('\n');
+  }
+  var titleTaps = 0, titleTimer = null;
+  document.addEventListener('click', function (e) {
+    if (!e.target || e.target.id !== 'titleH') return;
+    titleTaps += 1; clearTimeout(titleTimer);
+    titleTimer = setTimeout(function () { titleTaps = 0; }, 800);
+    if (titleTaps < 3) return;
+    titleTaps = 0;
+    if (dbgBox) { dbgBox.remove(); dbgBox = null; return; }
+    dbgBox = document.createElement('div');
+    dbgBox.className = 'dbg';
+    dbgBox.innerHTML = '<button id="dbgSpeak">Test voice</button><button id="dbgBeep">Test beep</button><button id="dbgClose">Close</button><pre></pre>';
+    document.body.appendChild(dbgBox);
+    dbgBox.querySelector('#dbgClose').onclick = function () { dbgBox.remove(); dbgBox = null; };
+    dbgBox.querySelector('#dbgBeep').onclick = function () { dbg('test beep'); tone(660, 0, 0.3, 'sine', 0.3); };
+    dbgBox.querySelector('#dbgSpeak').onclick = function () {
+      var ss = window.speechSynthesis;
+      if (!ss) { dbg('no speechSynthesis'); return; }
+      var u = new SpeechSynthesisUtterance('Testing, one, two, three.');
+      u.lang = 'en-US';
+      u.onstart = function () { dbg('test voice START'); };
+      u.onend = function () { dbg('test voice END'); };
+      u.onerror = function (ev) { dbg('test voice ERROR ' + (ev && ev.error)); };
+      dbg('test voice speak() speaking=' + ss.speaking + ' pending=' + ss.pending);
+      ss.speak(u);
+    };
+    renderDbg();
+  });
+
   // ---------- Sound effects (synthesized, no audio files) ----------
   var audioCtx = null;
   function ac() {
@@ -730,12 +779,16 @@
         whenMicQuiet(function () { go(true); }); return;
       }
       setAudioMode('playback');
-      u.addEventListener('start', function () { started = true; });
+      dbg('speak "' + u.text.slice(0, 40) + '" retry=' + !!retried + ' speaking=' + synth.speaking + ' pending=' + synth.pending + ' micOn=' + recRunning + ' session=' + (navigator.audioSession ? navigator.audioSession.type : '-'));
+      u.addEventListener('start', function () { started = true; dbg('  start "' + u.text.slice(0, 24) + '"'); });
+      u.addEventListener('end', function () { dbg('  end "' + u.text.slice(0, 24) + '"'); });
+      u.addEventListener('error', function (ev) { dbg('  ERROR ' + (ev && ev.error) + ' "' + u.text.slice(0, 24) + '"'); });
       synth.speak(u);
       if (synth.paused) synth.resume();
       setTimeout(function () {
         if (started || currentUtterance !== u) return;
-        if (retried) { voiceStuckNote(); return; }
+        if (retried) { dbg('  never started twice: stuck note'); voiceStuckNote(); return; }
+        dbg('  not started after 1.5s: retrying');
         var again = cloneUtterance(u);
         u.onstart = null; u.onend = null; u.onerror = null; // the jammed copy must not end the line early
         currentUtterance = again;
@@ -838,6 +891,8 @@
     r.interimResults = false;
     r.maxAlternatives = 3;
     r.continuous = !TURN_BASED;
+    ['start', 'end', 'audiostart', 'audioend'].forEach(function (n) { r.addEventListener(n, function () { dbg('mic ' + n); }); });
+    r.addEventListener('error', function (ev) { dbg('mic error ' + (ev && ev.error)); });
     r.onstart = function () {
       recRunning = true;
       recStarting = false;
